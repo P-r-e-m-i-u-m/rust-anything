@@ -193,7 +193,10 @@ pub fn package(opts: &Options) -> Result<Outcome> {
     };
     let mut notes = Vec::new();
     let version = match &opts.version {
-        Some(v) => v.clone(),
+        Some(v) => {
+            validate_package_version(v)?;
+            v.clone()
+        }
         None => original_version(&manifest).unwrap_or_else(|| {
             let v = cargo_version(&crate_dir).unwrap_or_else(|| "0.1.0".into());
             notes.push(format!(
@@ -315,6 +318,41 @@ fn safe_relative(path: &str) -> bool {
     Path::new(path)
         .components()
         .all(|c| matches!(c, Component::Normal(_)))
+}
+
+/// `MAJOR.MINOR.PATCH` with an optional `-prerelease`, without build metadata.
+/// This is the npm semver subset that is also valid for PyPI, so one check serves
+/// both package targets before any file is written.
+fn validate_package_version(version: &str) -> Result<()> {
+    let (core, prerelease) = match version.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (version, None),
+    };
+    let numbers: Vec<&str> = core.split('.').collect();
+    let valid_number = |s: &str| {
+        !s.is_empty()
+            && s.bytes().all(|b| b.is_ascii_digit())
+            && (s.len() == 1 || !s.starts_with('0'))
+    };
+    let valid_prerelease = |pre: &str| {
+        !pre.is_empty()
+            && pre.split('.').all(|id| {
+                !id.is_empty()
+                    && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    && !(id.bytes().all(|b| b.is_ascii_digit())
+                        && id.len() > 1
+                        && id.starts_with('0'))
+            })
+    };
+    if numbers.len() != 3
+        || !numbers.iter().all(|n| valid_number(n))
+        || !prerelease.is_none_or(valid_prerelease)
+    {
+        bail!(
+            "`{version}` is not a valid package version (MAJOR.MINOR.PATCH, e.g. 1.2.0); pass --version"
+        );
+    }
+    Ok(())
 }
 
 fn validate_npm_name(name: &str) -> Result<()> {
@@ -1068,6 +1106,21 @@ mod tests {
             relative(Path::new("/r"), Path::new("/r")).as_deref(),
             Some(".")
         );
+    }
+
+    #[test]
+    fn package_versions() {
+        assert!(validate_package_version("1.2.3").is_ok());
+        assert!(validate_package_version("1.2.3-beta.1").is_ok());
+        assert!(validate_package_version("0.0.0").is_ok());
+        assert!(validate_package_version("").is_err());
+        assert!(validate_package_version("bogus").is_err());
+        assert!(validate_package_version("1.0").is_err());
+        assert!(validate_package_version(" 1.0.0").is_err());
+        assert!(validate_package_version("1.0.0 ").is_err());
+        assert!(validate_package_version("01.0.0").is_err());
+        assert!(validate_package_version("1.2.3-").is_err());
+        assert!(validate_package_version("1.2.3-beta..1").is_err());
     }
 
     #[test]
